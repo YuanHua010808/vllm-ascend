@@ -17,6 +17,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.hbm_staging import transfer_packed
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -201,7 +202,10 @@ class MooncakeBackend(Backend):
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
+            if self.config.hbm_staging_bytes:
+                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes, config=config)
+            else:
+                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             failed_codes = [int(value) for value in res if value < 0]
             failed_count = len(failed_codes)
             if failed_count:
@@ -244,7 +248,10 @@ class MooncakeBackend(Backend):
             keys[:3],
         )
         try:
-            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            if self.config.hbm_staging_bytes:
+                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes)
+            else:
+                res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
             failed_codes = [int(value) for value in res_list if value < 0]
             failed_count = len(failed_codes)
@@ -285,8 +292,11 @@ class MooncakeStoreConfig:
     prefer_alloc_in_same_node: bool
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
+    hbm_staging_bytes: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.hbm_staging_bytes) is not int or self.hbm_staging_bytes < 0:
+            raise ValueError("hbm_staging_bytes must be a nonnegative integer")
         if not self.enable_ssd_offload:
             return
         if not self.ssd_offload_path:
@@ -319,6 +329,7 @@ class MooncakeStoreConfig:
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
+            hbm_staging_bytes=config.get("hbm_staging_bytes", 0),
         )
 
     @staticmethod
