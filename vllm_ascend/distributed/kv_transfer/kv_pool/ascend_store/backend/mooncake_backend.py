@@ -203,7 +203,8 @@ class MooncakeBackend(Backend):
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
             if self.config.hbm_staging_bytes:
-                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes, config=config)
+                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes,
+                                      config=config, async_copy=self.config.hbm_staging_async)
             else:
                 res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             failed_codes = [int(value) for value in res if value < 0]
@@ -249,7 +250,8 @@ class MooncakeBackend(Backend):
         )
         try:
             if self.config.hbm_staging_bytes:
-                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes)
+                res = transfer_packed(self.store, keys, addrs, sizes, self.config.hbm_staging_bytes,
+                                      async_copy=self.config.hbm_staging_async)
             else:
                 res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
@@ -293,10 +295,13 @@ class MooncakeStoreConfig:
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
     hbm_staging_bytes: int = 0
+    hbm_staging_async: bool = False
 
     def __post_init__(self) -> None:
         if type(self.hbm_staging_bytes) is not int or self.hbm_staging_bytes < 0:
             raise ValueError("hbm_staging_bytes must be a nonnegative integer")
+        if type(self.hbm_staging_async) is not bool:
+            raise ValueError("hbm_staging_async must be a boolean")
         if not self.enable_ssd_offload:
             return
         if not self.ssd_offload_path:
@@ -330,6 +335,7 @@ class MooncakeStoreConfig:
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
             hbm_staging_bytes=config.get("hbm_staging_bytes", 0),
+            hbm_staging_async=config.get("hbm_staging_async", False),
         )
 
     @staticmethod

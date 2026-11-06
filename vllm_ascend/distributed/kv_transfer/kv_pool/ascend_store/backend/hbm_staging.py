@@ -1,6 +1,6 @@
 """Bounded, byte-preserving HBM staging for Mooncake objects."""
 
-def transfer_packed(store, keys, addrs, sizes, capacity, *, config=None):
+def transfer_packed(store, keys, addrs, sizes, capacity, *, config=None, async_copy=False):
     """Gather before PUT or scatter successful GETs; preserve object ordering."""
     import acl
 
@@ -13,6 +13,8 @@ def transfer_packed(store, keys, addrs, sizes, capacity, *, config=None):
             raise ValueError("Mooncake object exceeds hbm_staging_bytes")
     if not keys:
         return []
+
+    stream = None
 
     size_bytes = max(map(sum, sizes))
     base, rc = acl.rt.malloc(size_bytes, 0)
@@ -27,13 +29,25 @@ def transfer_packed(store, keys, addrs, sizes, capacity, *, config=None):
         offset = 0
         for pointer, length in zip(pointers, lengths):
             src, dst = (pointer, base + offset) if gather else (base + offset, pointer)
-            # ACL_MEMCPY_DEVICE_TO_DEVICE; synchronous before transport/reuse.
-            rc = acl.rt.memcpy(dst, length, src, length, 3)
+            # ACL_MEMCPY_DEVICE_TO_DEVICE.
+            if stream is None:
+                rc = acl.rt.memcpy(dst, length, src, length, 3)
+            else:
+                rc = acl.rt.memcpy_async(dst, length, src, length, 3, stream)
             if rc != 0:
                 raise RuntimeError(f"HBM staging copy failed: {rc}")
             offset += length
+        if stream is not None:
+            rc = acl.rt.synchronize_stream(stream)
+            if rc != 0:
+                raise RuntimeError(f"HBM staging synchronization failed: {rc}")
 
     try:
+        if async_copy:
+            stream, rc = acl.rt.create_stream()
+            if rc != 0:
+                stream = None
+                raise RuntimeError(f"Staging stream creation failed: {rc}")
         results = []
         for key, pointers, lengths in zip(keys, addrs, sizes):
             size = sum(lengths)
@@ -51,6 +65,15 @@ def transfer_packed(store, keys, addrs, sizes, capacity, *, config=None):
             results.extend(result)
         return results
     finally:
+        if stream is not None:
+            # Drain even when submission failed after earlier copies were queued.
+            rc = acl.rt.synchronize_stream(stream)
+            if rc != 0:
+                # Keep registration and allocation alive while DMA may be active.
+                raise RuntimeError(f"Staging cleanup synchronization failed: {rc}")
+            rc = acl.rt.destroy_stream(stream)
+            if rc != 0:
+                raise RuntimeError(f"Staging stream destruction failed: {rc}")
         rc = store.unregister_buffer(base)
         if rc != 0:
             # Keep the allocation alive if transport registration remains live.

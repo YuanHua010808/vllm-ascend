@@ -22,6 +22,22 @@ class StagingTest(unittest.TestCase):
         runtime = SimpleNamespace(
             malloc=lambda size, policy: (100, 0), free=lambda ptr: 0, memcpy=memcpy
         )
+        pending = []
+
+        def memcpy_async(dst, capacity, src, size, kind, stream):
+            pending.append((dst, capacity, src, size, kind))
+            return 0
+
+        def synchronize(stream):
+            for args in pending:
+                memcpy(*args)
+            pending.clear()
+            return 0
+
+        runtime.create_stream = lambda: (1, 0)
+        runtime.memcpy_async = memcpy_async
+        runtime.synchronize_stream = synchronize
+        runtime.destroy_stream = lambda stream: 0
 
         class Store:
             value = b""
@@ -53,6 +69,15 @@ class StagingTest(unittest.TestCase):
             memory[10] = b"xx"
             module.transfer_packed(store, ["key"], [[10, 20]], [[2, 3]], 5)
             self.assertEqual(memory[10], b"xx")
+            store.fail = False
+            memory[10], memory[20] = b"ab", b"cde"
+            module.transfer_packed(store, ["key"], [[10, 20]], [[2, 3]], 5,
+                                   config=object(), async_copy=True)
+            self.assertEqual(store.value, b"abcde")
+            memory[10], memory[20] = b"xx", b"yyy"
+            module.transfer_packed(store, ["key"], [[10, 20]], [[2, 3]], 5, async_copy=True)
+            self.assertEqual((memory[10], memory[20]), (b"ab", b"cde"))
+            self.assertFalse(pending)
             with self.assertRaises(ValueError):
                 module.transfer_packed(store, ["key"], [[10, 20]], [[2, 3]], 4)
 

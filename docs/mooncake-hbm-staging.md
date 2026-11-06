@@ -12,7 +12,14 @@ PUT gathers each object's address list into a contiguous HBM allocation.
 GET reads into that allocation and scatters successful results back to the
 original addresses. Key order and byte layout are preserved.
 
-This is an experimental synchronous ACL device-copy implementation. It uses
+Set `hbm_staging_async: true` (JSON boolean) to enqueue each object's device
+copies with `acl.rt.memcpy_async` on a dedicated stream. A stream barrier
+before PUT and after GET scatter preserves completion and buffer lifetime.
+This batches copy submissions; it does not overlap network transfer with
+copy, and the backend method still returns only after completion. Default
+false uses synchronous `acl.rt.memcpy` for comparison.
+
+This is an experimental ACL device-copy implementation. It uses
 one transport call per key and allocates/registers staging per operation;
 there is no persistent buffer pool or fused kernel. No performance gain is
 claimed. Oversized objects fail; failed GETs are not scattered. An unregister
